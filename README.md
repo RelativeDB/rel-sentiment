@@ -1,37 +1,98 @@
 # rel-sentiment
 
-A quick probe: does RelativeDB's pretrained **RT-J** relational transformer
-have any innate sense of **sentiment**, with zero training?
+Does RelativeDB's pretrained **RT-J** relational transformer have an innate
+sense of **sentiment** — with no training and, ideally, no examples at all?
 
-We never fit a head or fine-tune. We hand it a one-table "database" of
-review sentences, mark some as demonstrations, mask the sentiment of a few
-held-out sentences, and let the frozen checkpoints fill them in — using only
-the two **head-free** task types:
+Short answer: **yes.** Given a one-table "database" of review sentences and
+nothing but a column literally named `sentiment`, the frozen model separates
+positive from negative sentences perfectly. It never sees a label, a head is
+never fitted, nothing is fine-tuned.
+
+## What it does
+
+We build a `reviews` table with a `text` column and a masked target, then ask
+the two **head-free** checkpoints that ship with the model to fill the target
+in for 12 held-out sentences:
 
 - **Binary classification** — target is a `BOOLEAN` cell (`sentiment`), scored
-  directly through the classification checkpoint's sigmoid.
-- **Regression** — target is a `NUMBER` cell (`rating`, 0=neg .. 1=pos), scored
-  through the regression checkpoint.
-
-The multiclass path (mask a `TEXT` cell) is deliberately avoided because it
-needs a fitted head; both tasks here are pure zero-shot inference.
-
-## How it works
-
-The model reads a **shared context**: the 24 labeled seed sentences become
-in-context demonstrations (their sentiment cell stays visible), while each of
-the 12 held-out sentences has its sentiment cell masked and predicted. Text is
-embedded by the bundled MiniLM encoder, so polarity is already partly present
-in the embedding space — the RT model just has to separate it.
+  straight through the classification checkpoint's sigmoid.
+- **Regression** — target is a `NUMBER` cell (`sentiment_rating`, 0=neg .. 1=pos),
+  scored through the regression checkpoint.
 
 ```sql
-PREDICT reviews.sentiment WHERE reviews.sentiment IS NULL   -- classification
-PREDICT reviews.rating    WHERE reviews.rating    IS NULL   -- regression
+PREDICT reviews.sentiment        WHERE reviews.sentiment        IS NULL   -- classification
+PREDICT reviews.sentiment_rating WHERE reviews.sentiment_rating IS NULL   -- regression
 ```
+
+The multiclass path (masking a `TEXT` cell) is deliberately avoided because it
+needs a fitted head. Both tasks here are pure inference.
+
+Each held-out sentence has its target cell masked; the model reads the sentence
+(embedded by the bundled MiniLM encoder) plus the semantics of the column name,
+and predicts. We report results with **zero examples** and with a single
+labeled pair (**2-shot**) for calibration.
+
+## Results (12 held-out sentences)
+
+| Regime                | Task           | Accuracy @0.5 | pos vs neg mean | separation |
+| --------------------- | -------------- | ------------- | --------------- | ---------- |
+| **0-shot** (name only) | classification | **12/12 (100%)** | 0.630 vs 0.275 | +0.354 |
+| **0-shot** (name only) | regression     | 8/12 (67%)   | +0.439 vs −0.509 | +0.948 |
+| **2-shot** (1 pos + 1 neg) | classification | **12/12 (100%)** | 0.661 vs 0.190 | +0.471 |
+| **2-shot** (1 pos + 1 neg) | regression | **12/12 (100%)** | +0.816 vs +0.020 | +0.796 |
+
+**Binary classification is already perfect with zero examples** — the column
+name `sentiment` alone is enough to separate positive (p ≈ 0.63) from negative
+(p ≈ 0.28). **Regression** ranks polarity correctly zero-shot too (a +0.95
+mean gap between positives and negatives), but its numeric scale is
+uncalibrated — several positives land just under 0.5 — so a fixed 0.5 threshold
+only catches 8/12. **One labeled pair fixes that**, pulling regression to 100%
+with positives near +0.8 and negatives near 0.
+
+### Zero-shot scores (column name only, no examples)
+
+```
+classification (prob positive)          regression (sentiment_rating)
+ p+     true  sentence                    r       true  sentence
+ 0.616  pos   I really enjoyed this...    +0.334  pos   I really enjoyed this...
+ 0.638  pos   An outstanding product...   +0.389  pos   An outstanding product...
+ 0.615  pos   Lovely atmosphere...        +0.513  pos   Lovely atmosphere...
+ 0.662  pos   So glad I tried it...       +0.553  pos   So glad I tried it...
+ 0.614  pos   A wonderful surprise...     +0.485  pos   A wonderful surprise...
+ 0.632  pos   Hands down the best...      +0.358  pos   Hands down the best...
+ 0.202  neg   Horrible from start...      -0.247  neg   Horrible from start...
+ 0.114  neg   The quality is garbage...   -0.403  neg   The quality is garbage...
+ 0.358  neg   What a disappointing...     +0.067  neg   What a disappointing...
+ 0.130  neg   Terrible support...         -2.094  neg   Terrible support...
+ 0.481  neg   I would never recommend...  +0.236  neg   I would never recommend...
+ 0.367  neg   Painfully dull...           -0.615  neg   Painfully dull...
+```
+
+### 2-shot scores (one positive + one negative example)
+
+```
+classification (prob positive)          regression (sentiment_rating)
+ p+     true  sentence                    r       true  sentence
+ 0.652  pos   I really enjoyed this...    +0.743  pos   I really enjoyed this...
+ 0.678  pos   An outstanding product...   +0.753  pos   An outstanding product...
+ 0.656  pos   Lovely atmosphere...        +0.868  pos   Lovely atmosphere...
+ 0.693  pos   So glad I tried it...       +0.897  pos   So glad I tried it...
+ 0.656  pos   A wonderful surprise...     +0.837  pos   A wonderful surprise...
+ 0.631  pos   Hands down the best...      +0.797  pos   Hands down the best...
+ 0.141  neg   Horrible from start...      -0.227  neg   Horrible from start...
+ 0.123  neg   The quality is garbage...   -0.094  neg   The quality is garbage...
+ 0.170  neg   What a disappointing...     +0.205  neg   What a disappointing...
+ 0.131  neg   Terrible support...         -0.150  neg   Terrible support...
+ 0.300  neg   I would never recommend...  +0.459  neg   I would never recommend...
+ 0.275  neg   Painfully dull...           -0.074  neg   Painfully dull...
+```
+
+These are clear-cut sentences by design — the point is to locate the signal,
+not to benchmark hard cases.
 
 ## Run
 
-**One command** (creates a venv, installs deps, runs the probe):
+**One command** (creates a venv, installs deps, runs everything):
 
 ```bash
 ./run.sh
@@ -58,69 +119,10 @@ Requirements:
 Everything else (numpy, sentence-transformers, huggingface_hub) is pulled in by
 `relativedb` — see `requirements.txt`.
 
-## Results (12 held-out sentences)
-
-Both tasks classify **all 12** held-out sentences correctly, with confident,
-well-separated scores.
-
-| Task                  | Metric                | Score |
-| --------------------- | --------------------- | ----- |
-| Binary classification | accuracy @0.5         | **12/12 (100%)** |
-| Regression            | sign accuracy @0.5    | **12/12 (100%)** |
-| Regression            | mean rating, positive | +0.92 |
-| Regression            | mean rating, negative | −0.06 |
-| Regression            | separation (pos−neg)  | +0.98 |
-
-### Binary classification — probability positive (threshold 0.5)
-
-```
- p+     pred  true  sentence
- 0.689  pos   pos   I really enjoyed this, it made my whole day better.
- 0.704  pos   pos   An outstanding product that exceeded my expectations.
- 0.709  pos   pos   Lovely atmosphere and the meal was superb.
- 0.722  pos   pos   So glad I tried it, pure delight from start to finish.
- 0.700  pos   pos   A wonderful surprise, everything went perfectly.
- 0.687  pos   pos   Hands down the best I have ever seen.
- 0.181  neg   neg   Horrible from start to finish, I want a refund.
- 0.159  neg   neg   The quality is garbage and it stopped working immediately.
- 0.179  neg   neg   What a disappointing mess, I hated every second.
- 0.152  neg   neg   Terrible support and a product that simply does not work.
- 0.233  neg   neg   I would never recommend this to anyone, avoid it.
- 0.254  neg   neg   Painfully dull and not worth a single penny.
-```
-Positives cluster at **p ≈ 0.69–0.72**, negatives at **p ≈ 0.15–0.25** — a
-clean gap with nothing near the 0.5 boundary.
-
-### Regression — predicted rating (0 = neg .. 1 = pos)
-
-```
- rating  pred  true  sentence
- +0.861  pos   pos   I really enjoyed this, it made my whole day better.
- +0.896  pos   pos   An outstanding product that exceeded my expectations.
- +0.965  pos   pos   Lovely atmosphere and the meal was superb.
- +0.970  pos   pos   So glad I tried it, pure delight from start to finish.
- +0.930  pos   pos   A wonderful surprise, everything went perfectly.
- +0.920  pos   pos   Hands down the best I have ever seen.
- -0.099  neg   neg   Horrible from start to finish, I want a refund.
- -0.111  neg   neg   The quality is garbage and it stopped working immediately.
- -0.029  neg   neg   What a disappointing mess, I hated every second.
- -0.137  neg   neg   Terrible support and a product that simply does not work.
- +0.079  neg   neg   I would never recommend this to anyone, avoid it.
- -0.059  neg   neg   Painfully dull and not worth a single penny.
-```
-Positives land near **+0.9**, negatives near **0.0** — a **+0.98** mean
-separation.
-
-### Takeaway
-
-On clear-cut sentences the pretrained model separates positive from negative
-cleanly, out of the box — so yes, there is a real innate sentiment signal, with
-**zero training and no head fitting**. These are easy cases by design; the point
-is to show the signal exists, not to benchmark hard ones.
-
 ## Files
 
-- `data.py` — the labeled seed sentences and held-out test sentences.
-- `sentiment.py` — builds the schema/wiring, runs both tasks, prints a report.
+- `data.py` — the labeled sentences and the 12 held-out test sentences.
+- `sentiment.py` — builds the schema/wiring, runs both tasks at 0- and 2-shot,
+  prints the report.
 - `requirements.txt` — Python dependencies.
-- `run.sh` — one-shot: create venv, install deps, run the probe.
+- `run.sh` — one-shot: create venv, install deps, run.
