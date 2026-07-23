@@ -1,0 +1,11 @@
+# RelativeDB pulls in its own runtime deps: numpy, sentence-transformers,
+# huggingface_hub. The macOS arm64 (Apple Silicon) wheel bundles the native
+# inference engine (librt_c); on other platforms build it from the RelQL repo
+# and point RELATIVEDB_RT_LIB at the result.
+relativedb>=0.2.0
+
+# Transitive deps, pinned here for documentation / reproducibility. They are
+# installed automatically by the line above; you don't need to list them.
+# numpy>=1.24
+# sentence-transformers>=3.0
+# huggingface_hub>=0.23
